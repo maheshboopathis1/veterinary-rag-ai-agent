@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic[email]
+python-dotenv
+cohere
+pinecone
+google-generativeai
+google-api-core
+mysql-connector-python
+resend
