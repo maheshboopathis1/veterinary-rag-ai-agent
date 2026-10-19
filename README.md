@@ -4,9 +4,6 @@
 
 **Live app:** https://notifications-reprints-signals-therefore.trycloudflare.com
 
-<!-- Add a screenshot or GIF of the app here -->
-<!-- ![Demo](docs/demo.gif) -->
-
 ---
 
 ## The Problem
@@ -137,12 +134,6 @@ Covered scenarios include retrieval with relevant and insufficient context, empt
 - Consult a licensed veterinarian for treatment decisions, especially for serious or urgent symptoms.
 - Answer quality depends on the coverage of the reference documents and product catalog.
 
-## Project Documentation
-
-- [`docs/intent.md`](docs/intent.md): problem and intent
-- [`docs/Final directive.md`](docs/Final%20directive.md): engineering rules governing the system
-- [`docs/ai-usage-log.md`](docs/ai-usage-log.md): 5-day AI usage log
-- [`docs/writeup.md`](docs/writeup.md): short write-up
 
 ## Author
 
