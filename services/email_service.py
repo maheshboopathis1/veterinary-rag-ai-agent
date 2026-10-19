@@ -1,127 +1,73 @@
-
+# services/email_service.py
 import logging
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import formataddr, make_msgid
 from html import escape
 
-import resend
-
-from config import SENDER_EMAIL, RESEND_API_KEY
+from config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD
 
 logger = logging.getLogger(__name__)
 
-# Initialize Resend once when this module is imported.
-resend.api_key = RESEND_API_KEY
+
+class EmailDeliveryError(Exception):
+    """Email could not be sent. The message is safe to show to the model/user."""
+
+
+_TD = "padding:10px;border:1px solid #ddd;"
+
+
+def _v(product: dict, key: str) -> str:
+    return escape(str(product.get(key) or "N/A"))
 
 
 def create_invoice_html(
     invoice_number: str,
     invoice_date: str,
-    customer_name: str,
     user_email: str,
     products: list[dict],
 ) -> str:
-    """
-    Build an HTML invoice containing product information
-    retrieved from the MySQL products table.
-    """
+    """Build the HTML invoice from MySQL product records."""
 
-    product_rows = ""
-    product_details = ""
+    rows = ""
+    details = ""
 
-    for product in products:
-        product_id = escape(str(product.get("ProductID") or "N/A"))
-        ingredient = escape(
-            str(product.get("ActiveIngredient") or "N/A")
-        )
-        category = escape(
-            str(product.get("ProductCategory") or "N/A")
-        )
-        target_animal = escape(
-            str(product.get("TargetAnimal") or "N/A")
-        )
-        disease = escape(str(product.get("Disease") or "N/A"))
+    for p in products:
+        pid = _v(p, "ProductID")
+        ingredient = _v(p, "ActiveIngredient")
+        target = _v(p, "TargetAnimal")
+        disease = _v(p, "Disease")
 
-        product_rows += f"""
+        rows += f"""
         <tr>
-            <td style="padding:10px;border:1px solid #ddd;">
-                {product_id}
-            </td>
-            <td style="padding:10px;border:1px solid #ddd;">
-                {ingredient}
-            </td>
-            <td style="padding:10px;border:1px solid #ddd;">
-                {category}
-            </td>
-            <td style="padding:10px;border:1px solid #ddd;">
-                {target_animal}
-            </td>
-            <td style="padding:10px;border:1px solid #ddd;">
-                {disease}
-            </td>
+            <td style="{_TD}">{pid}</td>
+            <td style="{_TD}">{ingredient}</td>
+            <td style="{_TD}">{_v(p, "ProductCategory")}</td>
+            <td style="{_TD}">{target}</td>
+            <td style="{_TD}">{disease}</td>
         </tr>
         """
 
-        symptoms = escape(str(product.get("Symptoms") or "N/A"))
-        dosage = escape(str(product.get("Dosage") or "N/A"))
-        route = escape(
-            str(product.get("RouteOfAdministration") or "N/A")
-        )
-        duration = escape(str(product.get("Duration") or "N/A"))
-        precautions = escape(
-            str(product.get("Precautions") or "N/A")
-        )
-
-        product_details += f"""
-        <div style="
-            margin:16px 0;
-            padding:15px;
-            border:1px solid #e5e7eb;
-            border-radius:6px;
-        ">
-            <h3 style="color:#2c3e50;">
-                Product ID: {product_id}
-            </h3>
-
+        details += f"""
+        <div style="margin:16px 0;padding:15px;border:1px solid #e5e7eb;border-radius:6px;">
+            <h3 style="color:#2c3e50;">Product ID: {pid}</h3>
             <p><b>Active Ingredient:</b> {ingredient}</p>
-            <p><b>Target Animal:</b> {target_animal}</p>
+            <p><b>Target Animal:</b> {target}</p>
             <p><b>Disease:</b> {disease}</p>
-            <p><b>Symptoms in Reference Data:</b> {symptoms}</p>
-            <p><b>Dosage in Reference Data:</b> {dosage}</p>
-            <p><b>Route of Administration:</b> {route}</p>
-            <p><b>Duration in Reference Data:</b> {duration}</p>
-            <p><b>Precautions:</b> {precautions}</p>
+            <p><b>Symptoms in Reference Data:</b> {_v(p, "Symptoms")}</p>
+            <p><b>Dosage in Reference Data:</b> {_v(p, "Dosage")}</p>
+            <p><b>Route of Administration:</b> {_v(p, "RouteOfAdministration")}</p>
+            <p><b>Duration in Reference Data:</b> {_v(p, "Duration")}</p>
+            <p><b>Precautions:</b> {_v(p, "Precautions")}</p>
         </div>
         """
 
-    safe_invoice_number = escape(invoice_number)
-    safe_invoice_date = escape(invoice_date)
-    safe_customer_name = escape(customer_name)
-    safe_user_email = escape(user_email)
+    safe_number = escape(invoice_number)
+    safe_date = escape(invoice_date)
+    safe_email = escape(user_email)
 
-    # Required end-of-email notice.
-    reference_notice = """
-    <div style="
-        margin-top:25px;
-        padding:16px;
-        background:#fff8e8;
-        border-left:4px solid #d9a441;
-        color:#59451b;
-    ">
-        <h3>Important Notice</h3>
-
-        <p>
-            Product recommendations are based on our currently
-            available product data and reference documentation.
-            Please consult a licensed veterinarian to confirm product
-            suitability and treatment decisions.
-        </p>
-
-        <p>
-            Product information in this email is provided for
-            reference purposes and may not cover every animal's
-            individual needs.
-        </p>
-    </div>
-    """
+    th = f'style="{_TD}"'
 
     return f"""
     <!DOCTYPE html>
@@ -131,23 +77,11 @@ def create_invoice_html(
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Veterinary Product Invoice</title>
     </head>
+    <body style="margin:0;padding:20px;background:#f5f7fa;color:#333;
+                 font-family:Arial,sans-serif;line-height:1.6;">
+        <div style="max-width:800px;margin:auto;padding:25px;background:#fff;
+                    border:1px solid #e5e7eb;border-radius:8px;">
 
-    <body style="
-        margin:0;
-        padding:20px;
-        background:#f5f7fa;
-        color:#333;
-        font-family:Arial,sans-serif;
-        line-height:1.6;
-    ">
-        <div style="
-            max-width:800px;
-            margin:auto;
-            padding:25px;
-            background:#fff;
-            border:1px solid #e5e7eb;
-            border-radius:8px;
-        ">
             <div style="text-align:center;">
                 <h1 style="color:#2c3e50;">Product Invoice</h1>
                 <p>Veterinary Information Assistant</p>
@@ -156,73 +90,52 @@ def create_invoice_html(
             <hr style="border:none;border-top:1px solid #eee;">
 
             <h3>Invoice Information</h3>
-
             <p>
-                <b>Invoice Number:</b> {safe_invoice_number}<br>
-                <b>Invoice Date (UTC):</b> {safe_invoice_date}
+                <b>Invoice Number:</b> {safe_number}<br>
+                <b>Invoice Date (UTC):</b> {safe_date}<br>
+                <b>Sent to:</b> {safe_email}
             </p>
 
-            <h3>Customer Information</h3>
-
-            <p>
-                <b>Name:</b> {safe_customer_name}<br>
-                <b>Email:</b> {safe_user_email}
-            </p>
-
-            <h3>Recommended Product Records</h3>
-
-            <table style="
-                width:100%;
-                border-collapse:collapse;
-                font-size:13px;
-            ">
+            <h3>Product Records</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
                 <thead>
                     <tr style="background:#f1f5f9;">
-                        <th style="padding:10px;border:1px solid #ddd;">
-                            Product ID
-                        </th>
-                        <th style="padding:10px;border:1px solid #ddd;">
-                            Active Ingredient
-                        </th>
-                        <th style="padding:10px;border:1px solid #ddd;">
-                            Category
-                        </th>
-                        <th style="padding:10px;border:1px solid #ddd;">
-                            Target Animal
-                        </th>
-                        <th style="padding:10px;border:1px solid #ddd;">
-                            Disease
-                        </th>
+                        <th {th}>Product ID</th>
+                        <th {th}>Active Ingredient</th>
+                        <th {th}>Category</th>
+                        <th {th}>Target Animal</th>
+                        <th {th}>Disease</th>
                     </tr>
                 </thead>
-
-                <tbody>
-                    {product_rows}
-                </tbody>
+                <tbody>{rows}</tbody>
             </table>
 
-            <h3 style="margin-top:25px;">
-                Product Reference Details
-            </h3>
-
-            {product_details}
+            <h3 style="margin-top:25px;">Product Reference Details</h3>
+            {details}
 
             <p style="margin-top:25px;">
-                Hello {safe_customer_name},<br><br>
+                Hello,<br><br>
                 Here are the product details associated with your
                 consultation. Please review them carefully.
             </p>
 
-            {reference_notice}
+            <div style="margin-top:25px;padding:16px;background:#fff8e8;
+                        border-left:4px solid #d9a441;color:#59451b;">
+                <h3>Important Notice</h3>
+                <p>
+                    Product information is based on our currently available
+                    product data and reference documentation. Please consult a
+                    licensed veterinarian to confirm product suitability and
+                    treatment decisions.
+                </p>
+                <p>
+                    This information is provided for reference purposes and may
+                    not cover every animal's individual needs.
+                </p>
+            </div>
 
-            <div style="
-                margin-top:25px;
-                padding-top:15px;
-                border-top:1px solid #eee;
-                text-align:center;
-                font-size:12px;
-                color:#777;
-            ">
+            <div style="margin-top:25px;padding-top:15px;border-top:1px solid #eee;
+                        text-align:center;font-size:12px;color:#777;">
                 This is an automatically generated email.
             </div>
         </div>
@@ -231,42 +144,86 @@ def create_invoice_html(
     """
 
 
+def _deliver(server: smtplib.SMTP, msg: EmailMessage, recipient: str) -> None:
+    server.login(SMTP_USER, SMTP_PASSWORD)
+    refused = server.send_message(msg)
+    if refused:
+        raise EmailDeliveryError(
+            f"The mail server refused the recipient address: {recipient}"
+        )
+
+
 def send_html_email(
     recipient_email: str,
     subject: str,
     html_body: str,
 ) -> str:
     """
-    Submit an HTML email using Resend.
-    Returns the email provider's ID.
+    Send an HTML email over SMTP.
+    Returns the Message-ID once the SMTP server has accepted the message.
+    Raises EmailDeliveryError on ANY failure (never returns on failure).
     """
 
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
+        raise EmailDeliveryError(
+            "Email service is not configured "
+            "(SMTP_HOST, SMTP_USER, SMTP_PASSWORD)."
+        )
+
+    recipient = (recipient_email or "").strip()
+    if not recipient or "@" not in recipient:
+        raise EmailDeliveryError("A valid recipient email address is required.")
+
+    sender_domain = SMTP_USER.split("@")[-1] if "@" in SMTP_USER else None
+    message_id = make_msgid(domain=sender_domain)
+
+    msg = EmailMessage()
+    msg["From"] = formataddr(("Veterinary AI", SMTP_USER))
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg["Message-ID"] = message_id
+    msg.set_content(
+        "Please open this email in an HTML-compatible email client "
+        "to view the veterinary invoice."
+    )
+    msg.add_alternative(html_body, subtype="html")
+
+    context = ssl.create_default_context()
+
     try:
-        response = resend.Emails.send({
-            "from": SENDER_EMAIL,
-            "to": [recipient_email],
-            "subject": subject,
-            "html": html_body,
-        })
+        if SMTP_PORT == 465:
+            # Implicit SSL
+            with smtplib.SMTP_SSL(
+                SMTP_HOST, SMTP_PORT, timeout=30, context=context
+            ) as server:
+                _deliver(server, msg, recipient)
+        else:
+            # STARTTLS (587 and others)
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                _deliver(server, msg, recipient)
 
-        email_id = response.get("id")
-
-        if not email_id:
-            raise RuntimeError(
-                "Resend did not return an email ID."
-            )
-
-        logger.info(
-            "Email submitted successfully. Recipient=%s ID=%s",
-            recipient_email,
-            email_id,
-        )
-
-        return email_id
-
-    except Exception:
-        logger.exception(
-            "Failed to submit email to %s",
-            recipient_email,
-        )
+    except EmailDeliveryError:
+        logger.exception("SMTP delivery failed for %s", recipient)
         raise
+    except smtplib.SMTPAuthenticationError as exc:
+        logger.exception("SMTP authentication failed")
+        raise EmailDeliveryError(
+            "SMTP authentication failed. Check SMTP_USER and SMTP_PASSWORD "
+            "(Gmail requires an App Password)."
+        ) from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        logger.exception("SMTP recipient refused")
+        raise EmailDeliveryError(
+            f"The mail server refused the recipient address: {recipient}"
+        ) from exc
+    except (smtplib.SMTPException, OSError) as exc:
+        logger.exception("SMTP connection/send error")
+        raise EmailDeliveryError(
+            "Could not connect to or send through the SMTP server."
+        ) from exc
+
+    logger.info("Email accepted by SMTP server for %s", recipient)
+    return message_id

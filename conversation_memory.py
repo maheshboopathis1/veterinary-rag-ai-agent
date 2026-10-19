@@ -1,158 +1,180 @@
+import json
+import os
 
-# conversation_memory.py
-
-MAX_HISTORY_MESSAGES = 12
-MAX_STORED_TURNS = 20
-
-sessions: dict[str, dict] = {}
+from redis.asyncio import Redis
 
 
-def get_session(session_id: str) -> dict:
-    return sessions.setdefault(
-        session_id,
-        {
-            "messages": [],
-            "recommended_products": [],
-            "customer_email": None,
-            "customer_name": None,
-        },
-    )
+REDIS_URL = os.getenv(
+    "REDIS_URL",
+    "redis://127.0.0.1:6379/0",
+)
+
+REDIS_TTL_SECONDS = int(
+    os.getenv("REDIS_TTL_SECONDS", "86400")
+)
+
+MAX_HISTORY_MESSAGES = int(
+    os.getenv("REDIS_MAX_MESSAGES", "20")
+)
+
+redis_client = Redis.from_url(
+    REDIS_URL,
+    decode_responses=True,
+    socket_connect_timeout=5,
+    socket_timeout=5,
+)
 
 
-def get_conversation_history(session_id: str) -> str:
-    session = get_session(session_id)
-    messages = session["messages"][-MAX_HISTORY_MESSAGES:]
+def _history_key(session_id: str) -> str:
+    return f"veterinary:session:{session_id}:history"
+
+
+def _recommended_key(session_id: str) -> str:
+    return f"veterinary:session:{session_id}:recommended_products"
+
+
+def _selected_invoice_key(session_id: str) -> str:
+    return f"veterinary:session:{session_id}:invoice_products"
+
+def _feedback_key(session_id: str) -> str:
+    return f"veterinary:session:{session_id}:feedback"
+
+
+async def check_redis_connection() -> bool:
+    return bool(await redis_client.ping())
+
+
+async def get_conversation_messages(
+    session_id: str,
+) -> list[dict]:
+    """Return recent conversation messages in chronological order."""
+
+    key = _history_key(session_id)
+
+    messages = await redis_client.lrange(key, 0, -1)
+
+    return [json.loads(message) for message in messages]
+
+
+async def get_conversation_history(
+    session_id: str,
+) -> str:
+    """Format recent messages for the LLM prompt."""
+
+    messages = await get_conversation_messages(session_id)
 
     return "\n".join(
-        line
-        for item in messages
-        for line in (
-            f"Pet Owner: {item['user']}",
-            f"Assistant: {item['assistant']}",
-        )
+        f"{'Pet Owner' if message['role'] == 'user' else 'Assistant'}: "
+        f"{message['content']}"
+        for message in messages
     )
 
 
-def save_conversation_turn(
+async def save_conversation_turn(
     session_id: str,
     user_message: str,
-    assistant_response: str,
-):
-    session = get_session(session_id)
+    assistant_message: str,
+) -> None:
+    """Save both sides of a conversation turn to Redis."""
 
-    session["messages"].append({
-        "user": user_message,
-        "assistant": assistant_response,
-    })
+    key = _history_key(session_id)
 
-    session["messages"] = session["messages"][-MAX_STORED_TURNS:]
+    messages = [
+        {
+            "role": "user",
+            "content": user_message,
+        },
+        {
+            "role": "assistant",
+            "content": assistant_message,
+        },
+    ]
+
+    # Save both messages and enforce the history limit atomically.
+    async with redis_client.pipeline(transaction=True) as pipe:
+        pipe.rpush(
+            key,
+            *[json.dumps(message) for message in messages],
+        )
+        pipe.ltrim(key, -MAX_HISTORY_MESSAGES, -1)
+        pipe.expire(key, REDIS_TTL_SECONDS)
+        await pipe.execute()
 
 
-def save_recommended_products(
+async def save_recommended_products(
     session_id: str,
-    products: list[dict],
-):
-    """
-    Save the actual product candidates shown to the user.
+    product_ids: list,
+) -> None:
+    key = _recommended_key(session_id)
 
-    Each product should contain a verified product_id and product_name.
-    Optional fields: description.
-    """
-    session = get_session(session_id)
-
-    normalized = []
-    seen_ids = set()
-
-    for product in products:
-        product_id = product.get("product_id")
-        product_name = product.get("product_name")
-
-        if product_id is None or not product_name:
-            continue
-
-        try:
-            product_id = int(product_id)
-        except (TypeError, ValueError):
-            continue
-
-        if product_id in seen_ids:
-            continue
-
-        seen_ids.add(product_id)
-
-        normalized.append({
-            "product_id": product_id,
-            "product_name": str(product_name).strip(),
-            "description": str(product.get("description", "")),
-        })
-
-    # Store the latest displayed recommendation set.
-    # This makes "first product" refer to the latest displayed list.
-    session["recommended_products"] = normalized
+    await redis_client.set(
+        key,
+        json.dumps(product_ids),
+        ex=REDIS_TTL_SECONDS,
+    )
 
 
-def get_recommended_products(session_id: str) -> list[dict]:
-    session = get_session(session_id)
-    return list(session.get("recommended_products", []))
-
-
-def save_customer_details(
+async def get_recommended_products(
     session_id: str,
-    email: str | None = None,
-    customer_name: str | None = None,
-):
-    session = get_session(session_id)
+) -> list:
+    value = await redis_client.get(
+        _recommended_key(session_id)
+    )
 
-    if email:
-        session["customer_email"] = email.strip()
-
-    if customer_name:
-        session["customer_name"] = customer_name.strip()
+    return json.loads(value) if value else []
 
 
-def get_customer_details(session_id: str) -> dict:
-    session = get_session(session_id)
+async def save_selected_invoice_products(
+    session_id: str,
+    product_ids: list,
+) -> None:
+    key = _selected_invoice_key(session_id)
 
-    return {
-        "customer_email": session.get("customer_email"),
-        "customer_name": session.get("customer_name"),
+    await redis_client.set(
+        key,
+        json.dumps(product_ids),
+        ex=REDIS_TTL_SECONDS,
+    )
+
+
+async def get_selected_invoice_products(
+    session_id: str,
+) -> list:
+    value = await redis_client.get(
+        _selected_invoice_key(session_id)
+    )
+
+    return json.loads(value) if value else []
+
+async def save_feedback(
+    session_id: str,
+    rating: str,
+    message_excerpt: str = "",
+    comment: str | None = None,
+) -> None:
+    key = _feedback_key(session_id)
+
+    entry = {
+        "rating": rating,
+        "message_excerpt": message_excerpt,
+        "comment": comment,
     }
 
+    async with redis_client.pipeline(transaction=True) as pipe:
+        pipe.rpush(key, json.dumps(entry))
+        pipe.expire(key, REDIS_TTL_SECONDS)
+        await pipe.execute()
 
-def save_verified_product_ids(
-    session_id: str,
-    product_ids: list[int],
-):
-    session = sessions.setdefault(session_id, {"messages": []})
+async def clear_conversation(session_id: str) -> None:
+    """Delete this session's chat and associated product selections."""
 
-    existing = session.get("verified_product_ids", [])
-    session["verified_product_ids"] = list(
-        dict.fromkeys(
-            [int(pid) for pid in existing]
-            + [int(pid) for pid in product_ids]
-        )
+    await redis_client.delete(
+        _history_key(session_id),
+        _recommended_key(session_id),
+        _selected_invoice_key(session_id),
+        _feedback_key(session_id),
     )
 
 
-def get_verified_product_ids(session_id: str) -> list[int]:
-    session = sessions.get(session_id, {})
-    return session.get("verified_product_ids", [])
-
-
-def save_selected_invoice_products(
-    session_id: str,
-    product_ids: list[int],
-):
-    session = sessions.setdefault(session_id, {"messages": []})
-
-    # Replace the selection with the user's latest confirmed selection.
-    session["selected_invoice_product_ids"] = list(
-        dict.fromkeys(int(pid) for pid in product_ids)
-    )
-
-
-def get_selected_invoice_products(session_id: str) -> list[int]:
-    session = sessions.get(session_id, {})
-    return session.get("selected_invoice_product_ids", [])
-
-
+async def close_redis_connection() -> None:
+    await redis_client.aclose()

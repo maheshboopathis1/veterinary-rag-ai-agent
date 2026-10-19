@@ -4,16 +4,16 @@ import sqlglot
 from sqlglot import exp
 
 from config import GEMINI_API_KEY
-
 from google import genai
 
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-3.1-flash-lite"
+MODEL_NAME = "gemini-3.5-flash-lite"
+
 
 PRODUCT_SCHEMA = """
-Table: products
+Table: vet_clinic
 
 Confirmed columns:
 - ProductID
@@ -53,7 +53,7 @@ VETERINARY RAG CONTEXT:
 
 RULES:
 1. Generate exactly one MySQL SELECT query.
-2. Query only the products table.
+2. Query only the vet_clinic table.
 3. Use only the confirmed database columns listed in the schema.
 4. NEVER use SELECT *.
 5. Always explicitly list the required columns:
@@ -86,7 +86,12 @@ SQL:
     sql = (response.text or "").strip()
 
     # Remove a Markdown fence if the model unexpectedly adds one.
-    sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(
+        r"^```(?:sql)?\s*",
+        "",
+        sql,
+        flags=re.IGNORECASE,
+    )
     sql = re.sub(r"\s*```$", "", sql).strip()
 
     if sql == "NEED_CLARIFICATION":
@@ -96,18 +101,18 @@ SQL:
 
 
 def validate_readonly_sql(sql: str) -> str:
-    """Allow only a narrowly scoped, read-only products query."""
+    """Allow only a narrowly scoped, read-only vet_clinic query."""
 
     if not sql or len(sql) > 5000:
         raise ValueError("Invalid SQL query.")
 
-    # Remove whitespace and allow one optional trailing semicolon.
     sql = sql.strip()
 
+    # Allow one optional trailing semicolon.
     if sql.endswith(";"):
         sql = sql[:-1].rstrip()
 
-    # Reject semicolons anywhere else to prevent multiple statements.
+    # Reject multiple SQL statements.
     if ";" in sql:
         raise ValueError("Multiple SQL statements are not allowed.")
 
@@ -124,20 +129,35 @@ def validate_readonly_sql(sql: str) -> str:
     if not isinstance(tree, exp.Select):
         raise ValueError("Only SELECT queries are allowed.")
 
-    # Restrict this agent to one table, with no joins or nested queries.
+    # Restrict this agent to one table, without joins or nested queries.
     if tree.args.get("joins"):
         raise ValueError("Joins are not allowed.")
 
-    if tree.find(exp.Subquery) or tree.find(exp.CTE) or tree.find(exp.Union):
-        raise ValueError("Nested queries, CTEs, and UNION are not allowed.")
+    if (
+        tree.find(exp.Subquery)
+        or tree.find(exp.CTE)
+        or tree.find(exp.Union)
+    ):
+        raise ValueError(
+            "Nested queries, CTEs, and UNION are not allowed."
+        )
 
     from_clause = tree.args.get("from_")
-    if not from_clause or not isinstance(from_clause.this, exp.Table):
-        raise ValueError("Query must select from the products table.")
+
+    if (
+        not from_clause
+        or not isinstance(from_clause.this, exp.Table)
+    ):
+        raise ValueError("Query must select from the vet_clinic table.")
 
     table = from_clause.this
-    if table.name.lower() != "products" or table.db or table.catalog:
-        raise ValueError("Only the products table is allowed.")
+
+    if (
+        table.name.lower() != "vet_clinic"
+        or table.db
+        or table.catalog
+    ):
+        raise ValueError("Only the vet_clinic table is allowed.")
 
     allowed_columns = {
         "productid",
@@ -152,28 +172,38 @@ def validate_readonly_sql(sql: str) -> str:
         "precautions",
     }
 
-    # Disallow SELECT * and unknown columns.
+    # Disallow SELECT *.
     for projection in tree.expressions:
         if isinstance(projection, exp.Star):
             raise ValueError("SELECT * is not allowed.")
 
+    # Reject columns not listed in the confirmed schema.
     for column in tree.find_all(exp.Column):
         if column.name.lower() not in allowed_columns:
             raise ValueError(f"Unknown column: {column.name}")
 
-        if column.table and column.table.lower() != table.alias_or_name.lower():
+        if (
+            column.table
+            and column.table.lower() != table.alias_or_name.lower()
+        ):
             raise ValueError("Unexpected table reference.")
 
     # Require a literal LIMIT between 1 and 20.
     limit = tree.args.get("limit")
+
     if limit is None:
         tree = tree.limit(20)
     else:
         limit_value = limit.expression
-        if not isinstance(limit_value, exp.Literal) or not limit_value.is_int:
+
+        if (
+            not isinstance(limit_value, exp.Literal)
+            or not limit_value.is_int
+        ):
             raise ValueError("LIMIT must be an integer literal.")
 
         amount = int(limit_value.this)
+
         if not 1 <= amount <= 20:
             raise ValueError("LIMIT must be between 1 and 20.")
 

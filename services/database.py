@@ -65,7 +65,7 @@ def get_products_by_ids(product_ids: list[str]) -> list[dict]:
                 RouteOfAdministration,
                 Duration,
                 Precautions
-            FROM products
+            FROM vet_clinic
             WHERE ProductID IN ({placeholders})
         """
 

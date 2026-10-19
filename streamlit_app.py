@@ -1,4 +1,7 @@
+# streamlit_app.py
+import json
 import uuid
+from datetime import datetime
 
 import requests
 import streamlit as st
@@ -11,7 +14,6 @@ st.set_page_config(
     page_title="VetCare AI",
     page_icon="🐾",
     layout="wide",
-    # We draw our own sidebar, so the native one stays collapsed and hidden.
     initial_sidebar_state="collapsed",
 )
 
@@ -21,10 +23,10 @@ SIDEBAR_WIDTH = 300  # px
 MAX_SAVED_CHATS = 10
 
 SUGGESTIONS = [
-    ("🥣", "What information is available about dog nutrition?"),
-    ("💧", "What are common signs of dehydration in pets?"),
-    ("🛒", "Show me available veterinary products."),
-    ("🧾", "Generate an invoice for my selected products."),
+    ("🩺", "What are the early signs of dehydration in dogs and cats?"),
+    ("🥣", "What are the key nutritional requirements for adult dogs?"),
+    ("💊", "Show catalog products used to manage vomiting in dogs."),
+    ("🧾", "I would like to prepare an invoice for a catalog product."),
 ]
 
 
@@ -39,24 +41,56 @@ def _is_mobile() -> bool:
         return False
 
 
+def _valid_sid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except ValueError:
+        return False
+
+
+def load_history_from_backend(session_id: str) -> list[dict]:
+    try:
+        r = requests.get(f"{API_BASE_URL}/history/{session_id}", timeout=5)
+        if r.ok:
+            return [
+                {"role": m["role"], "content": m["content"]}
+                for m in r.json().get("messages", [])
+            ]
+    except requests.RequestException:
+        pass
+    return []
+
+
 if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
+    sid = st.query_params.get("sid")
+    if sid and _valid_sid(sid):
+        st.session_state.session_id = str(sid)
+        st.session_state.messages = load_history_from_backend(str(sid))
+        st.session_state.scroll_to_bottom = bool(st.session_state.messages)
+    else:
+        st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.messages = []
+    st.query_params["sid"] = st.session_state.session_id
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
 if "history" not in st.session_state:
-    st.session_state.history = []  # archived chats from this browser session
+    st.session_state.history = []
 if "pending_prompt" not in st.session_state:
     st.session_state.pending_prompt = None
 if "awaiting" not in st.session_state:
-    st.session_state.awaiting = False  # a user message is waiting for an answer
+    st.session_state.awaiting = False
 if "scroll_to_bottom" not in st.session_state:
-    st.session_state.scroll_to_bottom = False
+    st.session_state.scroll_to_bottom = False  # used only when opening an old chat
+if "scroll_count" not in st.session_state:
+    st.session_state.scroll_count = 0
 if "sidebar_open" not in st.session_state:
     st.session_state.sidebar_open = not _is_mobile()
 
 
 # --------------------------------------------------
-# Callbacks (run before the script reruns, so no st.rerun() is needed)
+# Callbacks
 # --------------------------------------------------
 def toggle_sidebar() -> None:
     st.session_state.sidebar_open = not st.session_state.sidebar_open
@@ -85,6 +119,7 @@ def new_chat() -> None:
     st.session_state.messages = []
     st.session_state.pending_prompt = None
     st.session_state.awaiting = False
+    st.query_params["sid"] = st.session_state.session_id
 
 
 def open_chat(chat_id: str) -> None:
@@ -98,7 +133,137 @@ def open_chat(chat_id: str) -> None:
     st.session_state.pending_prompt = None
     st.session_state.awaiting = False
     st.session_state.scroll_to_bottom = True
+    st.query_params["sid"] = st.session_state.session_id
 
+
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
+def scroll_to_latest_message() -> None:
+    """
+    Bring the START of the newest chat message into view.
+    Called once while waiting (shows the 'Thinking...' area) and once when
+    the answer arrives (shows the top of the answer, not the bottom).
+    A counter in the HTML forces Streamlit to re-run the script each time.
+    """
+    st.session_state.scroll_count += 1
+    components.html(
+        """
+        <script>
+        // run id: %d
+        const doc = window.parent.document;
+        const go = () => {
+            const msgs = doc.querySelectorAll('[data-testid="stChatMessage"]');
+            if (msgs.length) {
+                msgs[msgs.length - 1].scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        };
+        setTimeout(go, 120);
+        setTimeout(go, 500);
+        </script>
+        """
+        % st.session_state.scroll_count,
+        height=0,
+    )
+
+
+def build_transcript() -> str:
+    lines = [
+        "VetCare AI - Conversation transcript",
+        f"Session: {st.session_state.session_id}",
+        f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "=" * 50,
+        "",
+    ]
+    for m in st.session_state.messages:
+        who = "You" if m["role"] == "user" else "VetCare AI"
+        lines.append(f"{who}:")
+        lines.append(m["content"])
+        lines.append("")
+    lines.append("-" * 50)
+    lines.append("AI responses do not replace professional veterinary advice.")
+    return "\n".join(lines)
+
+def submit_feedback(idx: int) -> None:
+    key = f"fb_{st.session_state.session_id[:8]}_{idx}"
+    value = st.session_state.get(key)  # st.feedback("thumbs"): 1 = up, 0 = down
+    if value is None or idx >= len(st.session_state.messages):
+        return
+    msg = st.session_state.messages[idx]
+    msg["feedback"] = value
+    try:
+        requests.post(
+            f"{API_BASE_URL}/feedback",
+            json={
+                "session_id": st.session_state.session_id,
+                "rating": "up" if value == 1 else "down",
+                "message_excerpt": msg["content"][:500],
+            },
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
+def copy_button(text: str) -> None:
+    payload = json.dumps(text).replace("</", "<\\/")
+    components.html(
+        f"""
+        <style>
+          body {{ margin: 0; }}
+          button {{
+            font: 500 12px Inter, system-ui, sans-serif; color: #64748B;
+            background: transparent; border: 1px solid #E2E8F0;
+            border-radius: 8px; padding: 5px 10px; cursor: pointer;
+          }}
+          button:hover {{ color: #0F766E; border-color: #0F766E; }}
+        </style>
+        <button id="b" type="button">⧉ Copy</button>
+        <script>
+          const text = {payload};
+          const btn = document.getElementById('b');
+          function fallback() {{
+            const t = document.createElement('textarea');
+            t.value = text; document.body.appendChild(t); t.select();
+            try {{ document.execCommand('copy'); }} catch (e) {{}}
+            document.body.removeChild(t);
+          }}
+          btn.onclick = async () => {{
+            try {{ await navigator.clipboard.writeText(text); }} catch (e) {{ fallback(); }}
+            btn.textContent = '✓ Copied';
+            setTimeout(() => btn.textContent = '⧉ Copy', 1500);
+          }};
+        </script>
+        """,
+        height=36,
+    )
+
+
+def render_message_actions(idx: int, message: dict) -> None:
+    key = f"fb_{st.session_state.session_id[:8]}_{idx}"
+    if key not in st.session_state and message.get("feedback") is not None:
+        st.session_state[key] = message["feedback"]
+
+    c_copy, c_fb, _ = st.columns([0.22, 0.22, 0.56], vertical_alignment="center")
+    with c_copy:
+        copy_button(message["content"])
+    with c_fb:
+        st.feedback("thumbs", key=key, on_change=submit_feedback, args=(idx,))
+
+
+@st.dialog("Invoice sent")
+def invoice_sent_dialog(invoice_number: str | None, email: str | None) -> None:
+    st.markdown("✅  **Your invoice email was submitted successfully.**")
+    if email:
+        st.markdown(f"**Recipient:** {email}")
+    if invoice_number:
+        st.markdown(f"**Invoice number:** `{invoice_number}`")
+    st.caption(
+        "Please check your inbox or spam folder. "
+        "Successful submission does not guarantee delivery."
+    )
+    if st.button("Done", type="primary", use_container_width=True):
+        st.rerun()
 
 # --------------------------------------------------
 # Styling
@@ -123,7 +288,6 @@ st.markdown(
         --sidebar-w: {SIDEBAR_WIDTH}px;
     }}
 
-    /* Always render in light mode, whatever the browser or OS theme is */
     .stApp {{ color-scheme: light; }}
     html, body, .stApp, button, textarea, input {{
         font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important;
@@ -136,7 +300,6 @@ st.markdown(
     }}
     .stApp :where(p, li, label, h1, h2, h3, h4) {{ color: var(--text-main); }}
 
-    /* Hide Streamlit chrome and the native sidebar (we use our own) */
     [data-testid="stHeader"],
     [data-testid="stToolbar"],
     [data-testid="stDecoration"],
@@ -147,15 +310,17 @@ st.markdown(
     [data-testid="stExpandSidebarButton"],
     #MainMenu, footer {{ display: none !important; }}
 
-    /* Main column */
     .block-container,
     [data-testid="stMainBlockContainer"] {{
         max-width: 860px;
         padding-top: 1.25rem;
-        padding-bottom: 8rem;
+        padding-bottom: 9rem;
     }}
     html {{ scroll-behavior: smooth; }}
     [data-testid="stMain"] {{ overflow-anchor: none; }}
+
+    /* Keeps a little space above a message when we scroll to it */
+    [data-testid="stChatMessage"] {{ scroll-margin-top: 1rem; }}
 
     /* ---------- Custom sidebar ---------- */
     .st-key-mysidebar {{
@@ -164,7 +329,7 @@ st.markdown(
         width: var(--sidebar-w);
         z-index: 1000;
         box-sizing: border-box;
-        padding: 1.25rem 1rem 1.25rem;
+        padding: 1.25rem 1rem;
         background: var(--bg-sidebar);
         border-right: 1px solid var(--border);
         overflow-y: auto;
@@ -192,7 +357,10 @@ st.markdown(
     .sidebar-status.online {{ color: var(--ok); }}
     .sidebar-status.offline {{ color: var(--bad); }}
 
-    .st-key-mysidebar .stButton > button {{ min-height: 2.5rem; padding: 0 0.8rem; }}
+    .st-key-mysidebar .stButton > button,
+    .st-key-mysidebar [data-testid="stDownloadButton"] button {{
+        min-height: 2.5rem; padding: 0 0.8rem;
+    }}
     .st-key-mysidebar .stButton > button p {{
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
     }}
@@ -207,10 +375,54 @@ st.markdown(
         background: var(--bg-card) !important;
         border-color: var(--border) !important;
     }}
-    .st-key-toggle_side button {{
-        background: transparent !important; border-color: transparent !important;
-        box-shadow: none !important; color: var(--text-muted) !important;
+
+    .side-card {{
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: 12px; padding: 0.55rem 0.9rem; margin-top: 0.35rem;
     }}
+    .side-item {{
+        display: flex; gap: 10px; align-items: flex-start;
+        padding: 0.4rem 0; font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;
+    }}
+    .side-item b {{ display: block; color: var(--text-main); font-weight: 600; font-size: 0.85rem; }}
+    .side-row {{
+        display: flex; justify-content: space-between;
+        font-size: 0.82rem; padding: 0.25rem 0; color: var(--text-muted);
+    }}
+    .side-row span:last-child {{ color: var(--text-main); font-weight: 500; }}
+
+    [class*="st-key-sideq_"] button {{
+        min-height: 2.25rem !important; font-size: 0.82rem !important;
+        padding: 0 0.7rem !important; box-shadow: none !important;
+    }}
+
+    /* Pin the bottom group to the bottom of the sidebar */
+    .st-key-sidebar_bottom {{
+        margin-top: auto; padding-top: 1rem; border-top: 1px solid var(--border);
+    }}
+    .st-key-toggle_side button {{
+        min-height: 2.5rem !important; background: var(--bg-card) !important;
+        border: 1px solid var(--border) !important; color: var(--text-main) !important;
+        box-shadow: none !important;
+    }}
+    .st-key-toggle_side button:hover {{
+        border-color: var(--accent) !important; color: var(--accent) !important;
+    }}
+
+    /* Download button: same look as other secondary buttons */
+    [data-testid="stDownloadButton"] button {{
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--bg-card);
+        color: var(--text-main);
+        font-size: 0.9rem;
+        font-weight: 500;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }}
+    [data-testid="stDownloadButton"] button:hover {{
+        border-color: var(--accent); color: var(--accent);
+    }}
+    [data-testid="stDownloadButton"] button p {{ color: inherit !important; margin: 0; }}
 
     /* ---------- Top bar ---------- */
     .st-key-topbar {{
@@ -287,7 +499,7 @@ st.markdown(
     }}
     .welcome p {{
         color: var(--text-muted); font-size: 1rem; line-height: 1.6;
-        max-width: 460px; margin: 0 auto;
+        max-width: 480px; margin: 0 auto;
     }}
     .section-label {{
         color: var(--text-muted); font-size: 0.85rem; font-weight: 500;
@@ -382,7 +594,6 @@ st.markdown(
         color: var(--text-muted); font-size: 0.78rem; text-align: center; padding-top: 0.75rem;
     }}
 
-    /* ---------- Small screens: sidebar becomes an overlay ---------- */
     @media (max-width: 900px) {{
         .st-key-mysidebar {{
             width: min(var(--sidebar-w), 85vw);
@@ -398,7 +609,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Push the page content right on desktop while our sidebar is open.
 if st.session_state.sidebar_open:
     st.markdown(
         f"""
@@ -418,7 +628,7 @@ if st.session_state.sidebar_open:
 # --------------------------------------------------
 # Backend integration
 # --------------------------------------------------
-def send_message(message: str) -> str:
+def send_message(message: str) -> dict:
     response = requests.post(
         f"{API_BASE_URL}/chat",
         json={"message": message, "session_id": st.session_state.session_id},
@@ -426,10 +636,17 @@ def send_message(message: str) -> str:
     )
     response.raise_for_status()
 
-    answer = response.json().get("response")
+    data = response.json()
+    answer = data.get("response")
     if answer is None:
         raise ValueError("The backend response does not contain a 'response' field.")
-    return str(answer)
+
+    return {
+        "answer": str(answer),
+        "invoice_sent": bool(data.get("invoice_sent")),
+        "invoice_number": data.get("invoice_number"),
+        "invoice_email": data.get("invoice_email"),
+    }
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -444,7 +661,7 @@ online = backend_is_available()
 
 
 # --------------------------------------------------
-# Read new input first, so the page renders in the right state
+# Read new input first
 # --------------------------------------------------
 typed = st.chat_input("Message VetCare AI…")
 prompt = st.session_state.pending_prompt or typed
@@ -453,11 +670,10 @@ st.session_state.pending_prompt = None
 if prompt and prompt.strip():
     st.session_state.messages.append({"role": "user", "content": prompt.strip()})
     st.session_state.awaiting = True
-    st.session_state.scroll_to_bottom = True
 
 
 # --------------------------------------------------
-# Sidebar (custom, fixed to the left edge)
+# Sidebar
 # --------------------------------------------------
 if st.session_state.sidebar_open:
     with st.container(key="mysidebar"):
@@ -467,12 +683,24 @@ if st.session_state.sidebar_open:
         )
 
         st.button(
-            "＋  New chat",
+            "New chat",
             key="new_chat",
             type="primary",
             use_container_width=True,
+            icon=":material/add:",
             on_click=new_chat,
         )
+
+        if st.session_state.messages:
+            st.download_button(
+                "Download conversation",
+                data=build_transcript(),
+                file_name=f"vetcare-chat-{st.session_state.session_id[:8]}.txt",
+                mime="text/plain",
+                key="download_chat",
+                use_container_width=True,
+                icon=":material/download:",
+            )
 
         if st.session_state.history:
             st.markdown('<div class="sidebar-heading">Recent chats</div>', unsafe_allow_html=True)
@@ -485,34 +713,55 @@ if st.session_state.sidebar_open:
                     args=(item["id"],),
                 )
 
-        st.markdown('<div class="sidebar-heading">About</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sidebar-heading">What I can help with</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="sidebar-caption">Your assistant for veterinary knowledge, '
-            "product search, and invoices.</div>",
+            """
+            <div class="side-card">
+              <div class="side-item"><span>🩺</span><div><b>Veterinary knowledge</b>Answers from reference documents</div></div>
+              <div class="side-item"><span>💊</span><div><b>Product search</b>Find catalog products by animal, disease or ingredient</div></div>
+              <div class="side-item"><span>🧾</span><div><b>Invoices</b>Email an invoice for verified products</div></div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
-        st.markdown('<div class="sidebar-heading">Service status</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sidebar-heading">Quick prompts</div>', unsafe_allow_html=True)
+        for i, (icon, text) in enumerate(SUGGESTIONS[:3]):
+            short = text if len(text) <= 30 else text[:30].rstrip() + "…"
+            st.button(
+                f"{icon}  {short}",
+                key=f"sideq_{i}",
+                use_container_width=True,
+                on_click=set_prompt,
+                args=(text,),
+            )
+
+        st.markdown('<div class="sidebar-heading">System</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="sidebar-status {"online" if online else "offline"}">'
-            f'● {"API online" if online else "API offline"}</div>',
+            f"""
+            <div class="side-card">
+              <div class="side-row"><span>Service</span>
+                <span class="sidebar-status {"online" if online else "offline"}">
+                  ● {"Online" if online else "Offline"}</span></div>
+              <div class="side-row"><span>Session</span><span>{st.session_state.session_id[:8]}</span></div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
-        st.markdown('<div class="sidebar-heading">Session</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="sidebar-caption">ID: {st.session_state.session_id[:8]}</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
-        st.button("«  Hide sidebar", key="toggle_side", on_click=toggle_sidebar)
-
-        st.markdown(
-            '<div class="sidebar-caption" style="font-size:0.75rem; margin-top:0.5rem;">'
-            "AI responses do not replace professional veterinary advice.</div>",
-            unsafe_allow_html=True,
-        )
+        with st.container(key="sidebar_bottom"):
+            st.button(
+                "Collapse sidebar",
+                key="toggle_side",
+                use_container_width=True,
+                icon=":material/left_panel_close:",
+                on_click=toggle_sidebar,
+            )
+            st.markdown(
+                '<div class="sidebar-caption" style="font-size:0.74rem; margin-top:0.6rem;">'
+                "AI responses do not replace professional veterinary advice.</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # --------------------------------------------------
@@ -545,9 +794,10 @@ if not st.session_state.messages:
         <div class="welcome">
             <div class="welcome-icon">🐾</div>
             <h1>How can I help you today?</h1>
-            <p>Ask a veterinary question, browse products, or request an invoice.</p>
+            <p>Ask a veterinary question, search the product catalog,
+            or request an invoice.</p>
         </div>
-        <div class="section-label">Try one of these</div>
+        <div class="section-label">Suggested questions</div>
         """,
         unsafe_allow_html=True,
     )
@@ -567,38 +817,52 @@ if not st.session_state.messages:
 # --------------------------------------------------
 # Chat history
 # --------------------------------------------------
-for message in st.session_state.messages:
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         if message.get("error"):
             st.error(message["content"])
         else:
             st.markdown(message["content"])
+            if message["role"] == "assistant":
+                render_message_actions(idx, message)
 
 
 # --------------------------------------------------
-# Get the assistant's answer (no st.rerun, so the page doesn't jump)
+# Get the assistant's answer
 # --------------------------------------------------
 if st.session_state.awaiting and st.session_state.messages:
     last_user_message = st.session_state.messages[-1]["content"]
-    answer, error_text = None, None
+    answer, error_text, result = None, None, None
 
     with st.chat_message("assistant"):
+        scroll_to_latest_message()
+
         try:
             with st.spinner("Thinking…"):
-                answer = send_message(last_user_message)
+                result = send_message(last_user_message)
+                answer = result["answer"]
         except requests.Timeout:
             error_text = "The request timed out. Please try again."
-        except requests.HTTPError as exc:
-            error_text = f"The AI service returned an error. Check your FastAPI logs. ({exc})"
+        except requests.HTTPError:
+            error_text = (
+                "The assistant could not process your request. "
+                "Please try again in a moment."
+            )
         except requests.RequestException:
-            error_text = "Unable to reach the backend. Make sure your FastAPI server is running."
-        except (ValueError, TypeError) as exc:
-            error_text = f"The backend returned an unexpected response. ({exc})"
+            error_text = (
+                "Unable to reach the service right now. "
+                "Please check your connection and try again."
+            )
+        except (ValueError, TypeError, KeyError):
+            error_text = "The service returned an unexpected response. Please try again."
 
         if error_text:
             st.error(error_text)
         else:
             st.markdown(answer)
+            render_message_actions(
+                len(st.session_state.messages), {"content": answer}
+            )
 
     if error_text:
         st.session_state.messages.append(
@@ -608,7 +872,10 @@ if st.session_state.awaiting and st.session_state.messages:
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
     st.session_state.awaiting = False
-    st.session_state.scroll_to_bottom = True
+    scroll_to_latest_message()
+
+    if result and result.get("invoice_sent"):
+        invoice_sent_dialog(result.get("invoice_number"), result.get("invoice_email"))
 
 
 # --------------------------------------------------
@@ -623,17 +890,8 @@ if st.session_state.messages:
 
 
 # --------------------------------------------------
-# Scroll to the newest message after sending or receiving
+# Scroll after opening a saved chat
 # --------------------------------------------------
 if st.session_state.scroll_to_bottom:
-    components.html(
-        """
-        <script>
-        const doc = window.parent.document;
-        const el = doc.querySelector('[data-testid="stMain"]') || doc.querySelector('section.main');
-        if (el) { setTimeout(() => el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }), 150); }
-        </script>
-        """,
-        height=0,
-    )
+    scroll_to_latest_message()
     st.session_state.scroll_to_bottom = False
