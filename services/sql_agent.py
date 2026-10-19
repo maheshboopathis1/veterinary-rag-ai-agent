@@ -18,6 +18,7 @@ Table: vet_clinic
 Confirmed columns:
 - ProductID
 - ActiveIngredient
+- ProductName
 - ProductCategory
 - TargetAnimal
 - Disease
@@ -59,6 +60,7 @@ RULES:
 5. Always explicitly list the required columns:
    ProductID,
    ActiveIngredient,
+   ProductName
    ProductCategory,
    TargetAnimal,
    Disease,
@@ -67,7 +69,7 @@ RULES:
    RouteOfAdministration,
    Duration,
    Precautions.
-6. For ingredient searches, use ActiveIngredient.
+6. For ingredient searches, use ActiveIngredient. For brand or product name searches, use ProductName (LIKE) and also ActiveIngredient.
 7. Use ProductCategory when searching for a product category.
 8. Return no more than 20 rows.
 9. Generate read-only SQL only.
@@ -162,6 +164,7 @@ def validate_readonly_sql(sql: str) -> str:
     allowed_columns = {
         "productid",
         "activeingredient",
+        "productname",
         "productcategory",
         "targetanimal",
         "disease",

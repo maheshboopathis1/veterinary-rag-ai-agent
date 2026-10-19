@@ -57,6 +57,7 @@ def get_products_by_ids(product_ids: list[str]) -> list[dict]:
             SELECT
                 ProductID,
                 ActiveIngredient,
+                ProductName,
                 ProductCategory,
                 TargetAnimal,
                 Disease,

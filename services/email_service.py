@@ -36,12 +36,15 @@ def create_invoice_html(
     for p in products:
         pid = _v(p, "ProductID")
         ingredient = _v(p, "ActiveIngredient")
+        raw_name = p.get("ProductName")
+        product_name = _v(p, "ProductName") if raw_name and str(raw_name).strip() else ingredient
         target = _v(p, "TargetAnimal")
         disease = _v(p, "Disease")
 
         rows += f"""
         <tr>
             <td style="{_TD}">{pid}</td>
+            <td style="{_TD}">{product_name}</td>
             <td style="{_TD}">{ingredient}</td>
             <td style="{_TD}">{_v(p, "ProductCategory")}</td>
             <td style="{_TD}">{target}</td>
@@ -52,6 +55,7 @@ def create_invoice_html(
         details += f"""
         <div style="margin:16px 0;padding:15px;border:1px solid #e5e7eb;border-radius:6px;">
             <h3 style="color:#2c3e50;">Product ID: {pid}</h3>
+            <p><b>Product Name:</b> {product_name}</p>
             <p><b>Active Ingredient:</b> {ingredient}</p>
             <p><b>Target Animal:</b> {target}</p>
             <p><b>Disease:</b> {disease}</p>
@@ -101,6 +105,7 @@ def create_invoice_html(
                 <thead>
                     <tr style="background:#f1f5f9;">
                         <th {th}>Product ID</th>
+                        <th {th}>Product Name</th>
                         <th {th}>Active Ingredient</th>
                         <th {th}>Category</th>
                         <th {th}>Target Animal</th>
